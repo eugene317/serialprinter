@@ -1,6 +1,6 @@
-"""Serial Printer (2026-10-15): type or scan a serial, see the label, press
-Enter and the Zebra prints "SN: <serial>" with its Code 128 barcode
-(serial_label.py draws it, same layout as the Bose earcup sticker).
+"""Serial Printer (2026-10-15): pick the item, type or scan a serial, see the
+label, press Enter and the Zebra prints the item's serial label - e.g. Bose
+QC 35: "S/N:<serial>" with its Code 128 barcode (serial_label.py draws it).
 
 It keeps data/serial_label_settings.json (printer, label size) and logs every
 print to data/serial_label_log.jsonl. Run it on the PC the Zebra is plugged
@@ -35,27 +35,37 @@ def api_settings():
     except OSError:
         printers = []
     return jsonify({"settings": s, "printers": printers, "saved": os.path.exists(serial_label.SETTINGS),
-                    "models": serial_label.ZEBRA_MODELS,
+                    "models": serial_label.ZEBRA_MODELS, "profiles": serial_label.load_printers(),
+                    "layouts": [{"name": n, "example": l["example"], "dateCode": l.get("date_code", "")}
+                                for n, l in serial_label.LAYOUTS.items()],
+                    "soon": serial_label.COMING_SOON,
                     "picked": serial_label.pick_printer(s["printer"], printers)})
 
 
 @app.route("/api/preview", methods=["POST"])
 def api_preview():
+    # "guess": the item the serial belongs to, so the page can switch to it
+    serial = request.get_json(force=True).get("serial", "")
+    guess = serial_label.guess_layout(serial)
     try:
-        img, info, warnings = serial_label.render(request.get_json(force=True).get("serial", ""))
+        img, info, warnings = serial_label.render(serial)
     except ValueError as e:
-        return _error(e)
+        return jsonify({"ok": False, "error": str(e), "guess": guess}), 400
     buf = io.BytesIO()
     img.save(buf, "PNG")
     s = serial_label.load_settings()
     info.update(widthMm=s["width_mm"], heightMm=s["height_mm"], dpi=s["dpi"], rotate=s["rotate"])
     return jsonify({"ok": True, "png": "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode(),
-                    "info": info, "warnings": warnings})
+                    "info": info, "warnings": warnings, "guess": guess})
 
 
 @app.route("/api/print", methods=["POST"])
 def api_print():
     body = request.get_json(force=True)
+    guess = serial_label.guess_layout(body.get("serial", ""))
+    if guess and guess != serial_label.load_settings()["layout"]:  # e.g. a Sonos serial scanned under QC 35
+        return jsonify({"ok": False, "guess": guess, "error": f"This is a {guess} serial - the item is "
+                        f"switched to {guess}. Check the label, then print."}), 400
     try:
         entry, info, warnings = serial_label.print_label(body.get("serial", ""), body.get("copies") or 1)
     except ValueError as e:
@@ -111,6 +121,10 @@ PAGE = r"""<!doctype html>
           background:var(--card); color:var(--text); min-width:0; }
   #serial { flex:3 1 260px; font-family:ui-monospace, Consolas, monospace; font-size:18px; letter-spacing:.5px; }
   #copies { flex:0 0 90px; }
+  #layout { flex:1 1 170px; font-weight:600; }
+  #date { flex:0 0 150px; font-family:ui-monospace, Consolas, monospace; font-size:18px; }
+  #date.need { border-color:var(--warn); box-shadow:0 0 0 2px color-mix(in srgb, var(--warn) 35%, transparent); }
+  option:disabled { color:var(--muted); }
   button { font:inherit; padding:12px 22px; border:0; border-radius:10px; background:var(--info);
            color:#fff; cursor:pointer; }
   button:disabled { opacity:.5; cursor:default; }
@@ -139,11 +153,14 @@ PAGE = r"""<!doctype html>
 <body>
 <main>
   <h1>Serial Printer</h1>
-  <div class="sub">Type or scan the serial, check the label, then press Enter or Print. The Zebra prints
-    "SN: serial" with its Code 128 barcode, same layout as the Bose earcup sticker.</div>
+  <div class="sub">Pick the item, type or scan the serial, check the label, then press Enter or Print.
+    The Zebra prints the serial with its barcode in the design of the item's own sticker.</div>
 
   <form id="f">
+    <select id="layout" title="Item"></select>
     <input id="serial" placeholder="Serial" autofocus autocomplete="off" spellcheck="false">
+    <input id="date" placeholder="Date: 1402" title="4-digit date code from the original label, e.g. 1402"
+           maxlength="4" inputmode="numeric" autocomplete="off" hidden>
     <input id="copies" type="number" min="1" max="50" value="1" title="Copies">
     <button id="print">Print</button>
   </form>
@@ -168,18 +185,21 @@ PAGE = r"""<!doctype html>
       <label>Printer resolution
         <select id="dpi"></select></label>
       <label>Label width (mm) <input id="width_mm" type="number" step="0.5" min="10" max="200"></label>
-      <label>Label height (mm) <input id="height_mm" type="number" step="0.5" min="4" max="150"></label>
+      <label>Label height (mm) <input id="height_mm" type="number" step="0.5" min="4" max="300"></label>
       <label>Rotate
         <select id="rotate"><option value="0">0°</option><option value="90">90°</option>
           <option value="180">180°</option><option value="270">270°</option></select></label>
       <label>Narrowest bar
-        <select id="bar_dots"><option value="0">Auto</option><option value="1">1 dot</option><option value="2">2 dots</option>
+        <select id="bar_dots"><option value="0">Item's own</option><option value="1">1 dot</option><option value="2">2 dots</option>
           <option value="3">3 dots</option><option value="4">4 dots</option><option value="5">5 dots</option></select></label>
       <label>Letter height (mm, 0 = auto) <input id="text_mm" type="number" step="0.1" min="0" max="20"></label>
       <label>Bar height (mm, 0 = auto) <input id="bars_mm" type="number" step="0.1" min="0" max="50"></label>
-      <label>Text before serial <input id="prefix"></label>
       <label>Move right (mm) <input id="shift_x_mm" type="number" step="0.25" min="-20" max="20"></label>
       <label>Move down (mm) <input id="shift_y_mm" type="number" step="0.25" min="-20" max="20"></label>
+      <label>Darkness (+/- on the printer's, 0 = leave it) <input id="darkness" type="number" step="1" min="-30" max="30"></label>
+      <label>Print speed
+        <select id="speed"><option value="0">Printer's own</option><option value="2">2 in/s (sharpest)</option>
+          <option value="3">3 in/s</option><option value="4">4 in/s</option><option value="6">6 in/s</option></select></label>
       <div class="wide" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <button type="button" class="ghost" id="refresh">Refresh printer list</button>
         <button type="button" class="ghost" id="download">Download ZPL</button>
@@ -196,8 +216,8 @@ PAGE = r"""<!doctype html>
 
 <script>
 const $ = id => document.getElementById(id);
-const FIELDS = ["host", "port", "model", "dpi", "width_mm", "height_mm", "rotate", "bar_dots", "text_mm", "bars_mm", "prefix", "shift_x_mm", "shift_y_mm"];
-let timer = null, seq = 0, models = {}, picked = null;
+const FIELDS = ["layout", "host", "port", "model", "dpi", "width_mm", "height_mm", "rotate", "bar_dots", "text_mm", "bars_mm", "shift_x_mm", "shift_y_mm", "darkness", "speed"];
+let timer = null, seq = 0, models = {}, picked = null, profiles = [], layouts = [];
 
 async function post(url, body) {
   const r = await fetch(url, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
@@ -229,7 +249,9 @@ function detect(name) {
 
 function fillSettings(d) {
   const s = d.settings;
-  models = d.models; picked = d.picked;
+  models = d.models; picked = d.picked; profiles = d.profiles || []; layouts = d.layouts || [];
+  $("layout").innerHTML = layouts.map(l => `<option value="${esc(l.name)}">${esc(l.name)}</option>`).join("") +
+    (d.soon || []).map(n => `<option disabled>${esc(n)} - coming soon</option>`).join("");
   const group = (title, g) => `<optgroup label="${title}">` + Object.entries(g).map(([m, dpis]) =>
     `<option value="${esc(m)}">${esc(m)} (${dpis.join("/")} dpi)</option>`).join("") + `</optgroup>`;
   $("model").innerHTML = `<option value="">Not sure / other Zebra</option>` +
@@ -240,9 +262,16 @@ function fillSettings(d) {
     .concat([`<option value="net">Network Zebra (IP address)</option>`]);
   if (s.printer && !d.printers.includes(s.printer))
     opts.splice(1, 0, `<option value="win:${esc(s.printer)}">${esc(s.printer)} (not installed here)</option>`);
+  const inches = mm => +(mm / 25.4).toFixed(2);
+  if (profiles.length)
+    opts.unshift(`<optgroup label="Saved Zebra printers">` + profiles.map(p =>
+      `<option value="pro:${esc(p.name)}">${esc(p.name)} - ${esc(p.model || "Zebra")} ${p.dpi} dpi - ${esc(p.host)}` +
+      ` - ${inches(p.width_mm)} x ${inches(p.height_mm)} in</option>`).join("") + `</optgroup>`);
   $("printer").innerHTML = opts.join("");
-  $("printer").value = s.send === "network" ? "net" : "win:" + s.printer;
+  $("printer").value = s.send === "network" ? (s.profile ? "pro:" + s.profile : "net") : "win:" + s.printer;
   FIELDS.forEach(k => { $(k).value = s[k]; });
+  $("date").hidden = !needsDate();
+  if (needsDate() && !$("date").value.trim()) $("date").value = needsDate();  // the item's usual code, e.g. 1402
   document.querySelectorAll(".net").forEach(el => el.hidden = s.send !== "network");
   if (s.send === "windows" && !d.picked)
     setStatus(d.printers.length ? "No Zebra printer picked - choose it in Printer and label settings." :
@@ -257,8 +286,9 @@ async function loadSettings() { fillSettings(await (await fetch("/api/settings")
 async function saveSettings() {
   const p = $("printer").value, body = {};
   FIELDS.forEach(k => { body[k] = $(k).value; });
-  body.send = p === "net" ? "network" : "windows";
-  body.printer = p === "net" ? "" : p.slice(4);
+  body.send = p.startsWith("win:") ? "windows" : "network";
+  body.printer = p.startsWith("win:") ? p.slice(4) : "";
+  body.profile = p.startsWith("pro:") ? p.slice(4) : "";
   setStatus("");
   fillSettings(await post("/api/settings", body));
   $("saved").textContent = "Saved.";
@@ -266,28 +296,58 @@ async function saveSettings() {
   preview();
 }
 
+// Items like Sonos print a date code that their barcode does not hold, so a scan
+// cannot give it: it is typed in its own box and sent before the serial.
+function needsDate() {  // the item's usual date code, or "" when it has none
+  const item = layouts.find(l => l.name === $("layout").value);
+  return item && item.dateCode || "";
+}
+function withDate(typed) {  // only before a bare serial; one typed with its date code is left as it is
+  const date = $("date").value.trim();
+  return needsDate() && date && typed.replace(/[\s:-]/g, "").length === 13 ? date + " " + typed : typed;
+}
+function switchItem(name) {  // a serial of another item puts that item's design on
+  $("layout").value = name;
+  saveSettings();
+  $("serial").focus();
+}
+
 async function preview() {
-  const serial = $("serial").value.trim(), mine = ++seq;
+  // with no serial typed, the item's example shows how its label prints
+  const typed = $("serial").value.trim(), mine = ++seq;
+  const item = layouts.find(l => l.name === $("layout").value);
+  const serial = withDate(typed) || (item ? item.example : "");
   if (!serial) {
     $("preview").hidden = true; $("empty").hidden = false; $("empty").textContent = "The label shows here";
     $("info").textContent = ""; $("warn").textContent = ""; return;
   }
   const r = await post("/api/preview", {serial});
   if (mine !== seq) return;
-  $("warn").textContent = (r.warnings || []).join(" ");
+  if (typed && r.guess && r.guess !== $("layout").value) {
+    switchItem(r.guess);
+    setStatus(`Item switched to ${r.guess} - this serial is one of its.`, "warn");
+    return;
+  }
+  const noDate = typed && needsDate() && !$("date").value.trim() && r.ok && r.info.serial.replace(/[-:]/g, "").length === 13 ?
+    ["No date code - the 4 digits before the serial on the original label (e.g. 1402) are not in its barcode; " +
+     "type them in the Date box."] : [];
+  $("date").classList.toggle("need", noDate.length > 0);
+  $("warn").textContent = noDate.concat(r.warnings || []).join(" ");
   if (!r.ok) {
     $("preview").hidden = true; $("empty").hidden = false; $("empty").textContent = r.error; $("info").textContent = ""; return;
   }
   const i = r.info;
   $("preview").src = r.png; $("preview").hidden = false; $("empty").hidden = true;
   $("labelbox").style.maxWidth = Math.min(760, i.widthMm * 14) + "px";
-  $("info").textContent = `${i.serial} - label ${i.widthMm} x ${i.heightMm} mm at ${i.dpi} dpi${i.rotate ? ", rotated " + i.rotate + "°" : ""}` +
-    ` - Code 128, narrowest bar ${i.barDots} dot${i.barDots > 1 ? "s" : ""} (${i.barMm} mm), barcode ${i.barcodeMm} x ${i.barcodeHeightMm} mm,` +
-    ` letters ${i.textMm} mm. Exact Bose sticker proportions with these bars: a ${i.stickerMm[0]} x ${i.stickerMm[1]} mm label.`;
+  $("info").textContent = (typed ? "" : `Example print-out for ${i.layout} - type or scan the serial to print yours. `) +
+    `${i.layout}: ${i.serial} - label ${i.widthMm} x ${i.heightMm} mm at ${i.dpi} dpi${i.rotate ? ", rotated " + i.rotate + "°" : ""}` +
+    ` - ${i.symbology}, narrowest bar ${i.barDots} dot${i.barDots > 1 ? "s" : ""} (${i.barMm} mm)` +
+    `${i.wideDots ? ", wide " + i.wideDots + " dots" : ""}, barcode ${i.barcodeMm} x ${i.barcodeHeightMm} mm,` +
+    ` letters ${i.textMm} mm. The original sticker's size with these bars: a ${i.stickerMm[0]} x ${i.stickerMm[1]} mm label.`;
 }
 
 async function doPrint() {
-  const serial = $("serial").value.trim();
+  const serial = withDate($("serial").value.trim());
   if (!serial) return;
   $("print").disabled = true; setStatus("Printing...");
   try {
@@ -296,6 +356,9 @@ async function doPrint() {
       const p = r.printed;
       setStatus(`Printed ${p.copies} x ${p.serial} on ${p.printer}.`, "ok");
       loadLog(); $("serial").select();
+    } else if (r.guess && r.guess !== $("layout").value) {
+      switchItem(r.guess);
+      setStatus(r.error, "warn");
     } else setStatus(r.error, "bad");
   } catch (e) { setStatus("Printing failed: " + e, "bad"); }
   $("print").disabled = false; $("serial").focus();
@@ -304,16 +367,29 @@ async function doPrint() {
 async function loadLog() {
   const rows = await (await fetch("/api/log")).json();
   $("log").innerHTML = rows.length ? rows.map(r =>
-    `<li><span class="sn" data-sn="${esc(r.serial)}">${esc(r.serial)}</span><span class="muted">${r.copies} x - ${esc(r.printer)}</span>` +
+    `<li><span class="sn" data-sn="${esc(r.serial)}">${esc(r.serial)}</span>` +
+    `<span class="muted">${r.item ? esc(r.item) + " - " : ""}${r.copies} x - ${esc(r.printer)}</span>` +
     `<span class="when">${esc(r.time.replace("T", " "))}</span></li>`).join("") : `<li class="muted">Nothing printed yet.</li>`;
 }
 
-$("f").onsubmit = e => { e.preventDefault(); doPrint(); };
-$("serial").oninput = () => { setStatus(""); clearTimeout(timer); timer = setTimeout(preview, 150); };
+$("f").onsubmit = e => {
+  e.preventDefault();
+  // a scanner's Enter after the serial moves on to the date code; Enter there prints
+  if (needsDate() && document.activeElement === $("serial") && $("serial").value.trim()) {
+    $("date").focus(); $("date").select(); return;
+  }
+  doPrint();
+};
+$("serial").oninput = $("date").oninput = () => { setStatus(""); clearTimeout(timer); timer = setTimeout(preview, 150); };
 FIELDS.forEach(k => { $(k).onchange = saveSettings; });
 $("printer").onchange = () => {
   const p = $("printer").value, name = p === "win:" ? picked : p.slice(4);
-  if (p !== "net" && name) {
+  const mine = p.startsWith("pro:") && profiles.find(x => x.name === name);
+  if (mine) {  // a saved printer brings its own IP, model, dpi, label size and fine-tuning
+    $("model").value = mine.model;
+    fillDpi(mine.model, mine.dpi);
+    FIELDS.forEach(k => { if (k in mine && k !== "model" && k !== "dpi") $(k).value = mine[k]; });
+  } else if (p.startsWith("win:") && name) {
     const d = detect(name);
     if (d.model) $("model").value = d.model;
     fillDpi($("model").value, d.dpi || $("dpi").value);
@@ -323,16 +399,20 @@ $("printer").onchange = () => {
 $("model").onchange = () => { fillDpi($("model").value, $("dpi").value); saveSettings(); };
 $("refresh").onclick = loadSettings;
 $("download").onclick = () => {
-  const serial = $("serial").value.trim();
+  const serial = withDate($("serial").value.trim());
   if (serial) location.href = `/api/zpl?serial=${encodeURIComponent(serial)}&copies=${+$("copies").value || 1}`;
 };
 $("log").onclick = e => {
   const sn = e.target.dataset && e.target.dataset.sn;
-  if (sn) { $("serial").value = sn; preview(); $("serial").focus(); }
+  if (!sn) return;
+  const split = needsDate() && /^(\d{4})(\w{13})$/.exec(sn);  // a logged Sonos serial keeps its date code in front
+  if (split) $("date").value = split[1];
+  $("serial").value = split ? split[2] : sn;
+  preview(); $("serial").focus();
 };
-loadSettings(); loadLog();
 const fromUrl = new URLSearchParams(location.search).get("serial");  // e.g. /?serial=077061Z8240B195AE
-if (fromUrl) { $("serial").value = fromUrl; preview(); }
+if (fromUrl) $("serial").value = fromUrl;
+loadSettings().then(preview); loadLog();
 </script>
 </body>
 </html>

@@ -1,9 +1,9 @@
 # Serial Printer
 
-Prints a replacement serial label on a Zebra printer. You type or scan a serial,
-check the preview, and press Enter. The label has the line `SN: <serial>` with a
-Code 128 barcode of the serial under it, laid out like the Bose earcup serial
-sticker.
+Prints a replacement serial label on a Zebra printer. You pick the item, type or
+scan a serial, check the preview, and press Enter. The label is a line of text
+with a Code 128 barcode of the serial under it, in the design of the item's own
+serial sticker (see [Items](#items-label-designs)).
 
 The app draws the whole label at the printer's own dot size and sends it as ZPL,
 so the preview is exactly what gets printed. The barcode is checked to decode
@@ -38,20 +38,59 @@ Open **Printer and label settings** on the page. Settings are saved per PC in
 - **Printer resolution**: must match the printer (203, 300 or 600 dpi). It is on
   the printer's sticker or configuration printout.
 - **Label width / height**: the size of the label as it comes out of the printer.
-  The barcode is placed in whole printer dots, so its length can only change in
-  steps. Below the preview, the page shows the label size that gives the exact
-  sticker proportions:
-
-  | Printer | Narrowest bar | Barcode (17-character serial) | Label for the sticker look |
-  |---|---|---|---|
-  | 300 dpi | 2 dots, 0.17 mm | 33.9 mm | about 44 x 7 mm (same as the Bose sticker) |
-  | 203 dpi | 1 dot, 0.125 mm | 25 mm | about 33 x 5 mm (small, harder to scan) |
-  | 203 dpi | 2 dots, 0.25 mm | 50 mm | about 65 x 10 mm |
-
+  The item's label is printed centred on it.
 - **Rotate**: use this if the labels come out sideways.
+- **Narrowest bar**: *Item's own* uses the item's bar size; pick a dot count only
+  to override it.
 - **Move right / Move down**: use these if the print is off-centre on the label.
-- **Letter height / Bar height**: 0 means automatic (sticker proportions).
-- **Text before serial**: `SN: ` by default.
+- **Letter height / Bar height**: 0 means automatic (the item's proportions).
+- **Darkness**: added to the printer's own darkness (-30 to +30, 0 = leave it).
+  Too dark makes thin bars spread into the spaces, so raise it in small steps.
+- **Print speed**: slower prints sharper (2 in/s is the sharpest).
+  Darkness and speed go with each label only. Nothing is saved to the printer,
+  but it keeps them until another job sets its own or it is turned off.
+
+## Items (label designs)
+
+Pick the item in the list next to the serial box. With no serial typed, the
+preview shows the item's example label. The item is shared by all printers; the
+printer settings (label size, position, darkness, speed) stay with the printer.
+
+- **Bose QC 35**: `S/N:` and the serial in bold, heavy Arial-like letters,
+  centred over a Code 128 barcode and running a little past both ends; bars 2.3
+  times the letter height; narrowest bar 0.13 mm (1 dot at 203 dpi). Measured
+  from the original earcup sticker next to test prints.
+- **Sonos Play:1**: a Code 39 barcode of the 13-character serial (1-dot narrow
+  bars, 3-dot wide ones, characters 2 dots apart: 31.7 mm long, 3.8 mm tall, as
+  measured against the original) with `1402 B8 – E9 – 37 – 5C – 04 – 1A – 7`
+  under it in bold condensed letters (Arial Narrow Bold narrowed to the
+  barcode's width), as on the base sticker. Scan or type the serial (`B8E9375C041A7`, `B8-E9-37-5C-04-1A:7`).
+  The 4-digit date code before it is not in the barcode, so a scan cannot give
+  it: it comes from the **Date** box, which starts with `1402` (as on the
+  original) and keeps the last code used - change it when a unit's original
+  label shows another. Enter after the serial jumps to that box; Enter there
+  prints (an emptied box prints without a date code).
+
+A new item is added in `LAYOUTS` in `serial_label.py`, with proportions measured
+from its original sticker; items still waiting for their design are listed in
+`COMING_SOON`.
+
+## Saved printers
+
+With several network Zebras, list them in `data/serial_label_printers.json`
+(kept per PC, like the settings). They show at the top of the **Printer** list;
+picking one sets its IP, model, dpi and label size at once. Changes made on the
+page while it is picked (label size, Move right, darkness...) are kept for that
+printer.
+
+```json
+[
+  {"name": "Printer 1S", "host": "192.168.1.204", "model": "S4M", "dpi": 203,
+   "width_mm": 57.15, "height_mm": 31.75, "darkness": 10, "speed": 2}
+]
+```
+
+Any setting left out gets its default (port 9100).
 
 ## Use
 
